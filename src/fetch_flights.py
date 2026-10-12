@@ -1,5 +1,7 @@
 import requests
 
+from src.storage.mongo import save_planes
+
 URL = "https://opensky-network.org/api/states/all"
 BBOX_MAROC = {"lamin": 27.6, "lomin": -13.2, "lamax": 35.9, "lomax": -1.0}
 
@@ -43,6 +45,8 @@ def main():
     for p in planes:
         name = p["callsign"] or p["icao24"]
         print(name, "|", p["country"], "|", p["altitude_m"], "m |", p["speed_kmh"], "km/h")
+    inserted = save_planes(planes)
+    print("Nouvelles positions enregistrées :", inserted)
 
 
 if __name__ == "__main__":
