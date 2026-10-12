@@ -13,5 +13,16 @@ services:
       timeout: 5s
       retries: 5
 
+  collector:
+    build:
+      context: .
+      dockerfile: docker/collector.Dockerfile
+    container_name: flight-collector
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+
 volumes:
   mongo_data:
