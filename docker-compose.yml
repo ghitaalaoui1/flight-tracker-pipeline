@@ -61,5 +61,17 @@ services:
       KAFKA_BOOTSTRAP: kafka:19092
       MONGO_URI: mongodb://mongo:27017
 
+  spark:
+    build:
+      context: .
+      dockerfile: docker/spark.Dockerfile
+    container_name: flight-spark
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:19092
+
 volumes:
   mongo_data:
