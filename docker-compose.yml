@@ -25,6 +25,12 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
 
   producer:
     build:
@@ -32,8 +38,10 @@ services:
       dockerfile: docker/collector.Dockerfile
     container_name: flight-producer
     command: ["python", "-m", "src.messaging.producer"]
+    restart: unless-stopped
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:19092
 
@@ -43,9 +51,12 @@ services:
       dockerfile: docker/collector.Dockerfile
     container_name: flight-consumer
     command: ["python", "-m", "src.messaging.consumer"]
+    restart: unless-stopped
     depends_on:
-      - mongo
-      - kafka
+      mongo:
+        condition: service_started
+      kafka:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:19092
       MONGO_URI: mongodb://mongo:27017
