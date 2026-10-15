@@ -72,6 +72,18 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:19092
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+    container_name: flight-dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    depends_on:
+      - mongo
+    environment:
+      MONGO_URI: mongodb://mongo:27017
 
 volumes:
   mongo_data:

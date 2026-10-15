@@ -5,13 +5,15 @@ Pipeline de donnees en temps reel sur le trafic aerien au-dessus du Maroc.
 [English version](README.en.md)
 
 Les positions des avions sont collectees depuis l'API OpenSky Network,
-publiees dans Kafka, stockees dans MongoDB, et analysees en continu par
-Spark Structured Streaming pour detecter des evenements notables.
+publiees dans Kafka, stockees dans MongoDB, analysees en continu par
+Spark Structured Streaming, et visualisees dans un tableau de bord Streamlit.
+
+![Tableau de bord](docs/images/airtrafic.png)
 
 ## Architecture
 
 ```
-                                    ┌──> Consumer ──> MongoDB
+                                    ┌──> Consumer ──> MongoDB ──> Dashboard
 OpenSky API ──> Producer ──> Kafka ─┤
                                     └──> Spark Streaming ──> Alertes
 ```
@@ -23,6 +25,7 @@ OpenSky API ──> Producer ──> Kafka ─┤
 | Consumer | Lit le topic et ecrit dans MongoDB |
 | Spark Streaming | Analyse le meme flux en parallele et detecte urgences, approches et circuits d'attente |
 | MongoDB | Stockage operationnel des positions |
+| Dashboard | Interface Streamlit : carte temps reel, indicateurs, vols en approche |
 
 Le decouplage par Kafka permet d'ajouter un consommateur sans jamais
 modifier le producteur.
@@ -36,6 +39,8 @@ Prerequis : Docker Desktop, et une horloge systeme synchronisee
 docker compose up -d --build
 docker compose ps
 ```
+
+Le tableau de bord est ensuite accessible sur http://localhost:8501
 
 Suivre l'activite :
 
@@ -63,6 +68,24 @@ mongodb://localhost:27018
 ```
 
 Base `flights`, collection `positions`.
+
+## Tableau de bord
+
+Interface Streamlit alimentee par MongoDB, affichant les 15 dernieres minutes
+de trafic :
+
+- Indicateurs : nombre d'avions suivis, pays representes, altitude moyenne
+- Carte centree sur le Maroc, une position par avion, avec infobulle
+  (indicatif, pays, altitude)
+- Repartition par pays d'immatriculation
+- Table des avions en approche ou au decollage
+- Table complete des vols, triee par altitude
+
+Pour le lancer seul, sans conteneur :
+
+```bash
+streamlit run src/dashboard/app.py
+```
 
 ## Detections temps reel
 
@@ -103,6 +126,9 @@ Test realise : MongoDB arrete pendant la collecte.
 Au demarrage, le producer et le consumer attendent que Kafka passe son
 healthcheck. `depends_on` seul ne suffit pas : il attend que le conteneur
 demarre, pas que le broker accepte les connexions.
+
+Le dashboard affiche un message explicite si MongoDB est injoignable, au lieu
+de remonter une trace Python.
 
 ## Validation
 
@@ -152,10 +178,15 @@ suivi d'un redemarrage de Docker Desktop.
 `ENV PYTHONUNBUFFERED=1` dans l'image, `docker compose logs` reste vide meme
 quand la pipeline fonctionne.
 
+**Le cadrage automatique d'une carte suit les donnees.** Avec `st.map`, la
+vue se recentrait sur l'Espagne des que le trafic se concentrait au nord de
+la zone. Le dashboard fixe donc explicitement le centre et le zoom via
+`pydeck`.
+
 ## Technologies
 
 Python, Apache Kafka, Apache Spark (Structured Streaming), MongoDB,
-Docker Compose, pytest
+Streamlit, Docker Compose, pytest
 
 ## Tests
 
@@ -173,12 +204,15 @@ src/
 │   └── consumer.py        lecture Kafka et ecriture MongoDB
 ├── streaming/
 │   └── spark_job.py       detections temps reel
+├── dashboard/
+│   └── app.py             interface Streamlit
 └── storage/
     └── mongo.py           acces a la base
 
 docker/
 ├── collector.Dockerfile   image commune producer/consumer
 ├── spark.Dockerfile       image Spark avec connecteurs Kafka
+├── dashboard.Dockerfile   image Streamlit
 └── download_jars.sh       telechargement des connecteurs au build
 
 scripts/
@@ -199,8 +233,11 @@ avion et par fenetre de 10 minutes. Une frequence plus elevee affinerait les
 detections mais consommerait davantage de credits API (400 par jour en acces
 anonyme, 4000 avec un compte).
 
+Le dashboard lit MongoDB a chaque rafraichissement manuel, sans mise a jour
+automatique.
+
 ## Etapes suivantes
 
-- Dashboard de visualisation : carte temps reel et alertes
 - Orchestration Airflow et archivage quotidien en Parquet
 - Mini entrepot de donnees en schema en etoile pour l'analyse historique
+- Affichage des alertes Spark dans le dashboard

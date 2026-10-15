@@ -5,13 +5,15 @@ Real-time data pipeline tracking air traffic over Morocco.
 [Version francaise](README.md)
 
 Aircraft positions are collected from the OpenSky Network API, published to
-Kafka, stored in MongoDB, and continuously analyzed by Spark Structured
-Streaming to detect notable events.
+Kafka, stored in MongoDB, continuously analyzed by Spark Structured
+Streaming, and visualized in a Streamlit dashboard.
+
+![Dashboard](docs/images/airtrafic.png)
 
 ## Architecture
 
 ```
-                                    ┌──> Consumer ──> MongoDB
+                                    ┌──> Consumer ──> MongoDB ──> Dashboard
 OpenSky API ──> Producer ──> Kafka ─┤
                                     └──> Spark Streaming ──> Alerts
 ```
@@ -23,6 +25,7 @@ OpenSky API ──> Producer ──> Kafka ─┤
 | Consumer | Reads the topic and writes to MongoDB |
 | Spark Streaming | Analyzes the same stream in parallel, detecting emergencies, approaches and holding patterns |
 | MongoDB | Operational storage for positions |
+| Dashboard | Streamlit interface: live map, metrics, aircraft on approach |
 
 Decoupling through Kafka means a new consumer can be added without touching
 the producer.
@@ -36,6 +39,8 @@ Requirements: Docker Desktop, and a correctly synchronized system clock
 docker compose up -d --build
 docker compose ps
 ```
+
+The dashboard is then available at http://localhost:8501
 
 Follow the activity:
 
@@ -63,6 +68,23 @@ mongodb://localhost:27018
 ```
 
 Database `flights`, collection `positions`.
+
+## Dashboard
+
+Streamlit interface backed by MongoDB, showing the last 15 minutes of traffic:
+
+- Metrics: aircraft tracked, countries represented, average altitude
+- Map centred on Morocco, one position per aircraft, with a tooltip
+  (callsign, country, altitude)
+- Breakdown by country of registration
+- Table of aircraft on approach or departure
+- Full flight table, sorted by altitude
+
+To run it on its own, outside Docker:
+
+```bash
+streamlit run src/dashboard/app.py
+```
 
 ## Real-time detections
 
@@ -103,6 +125,9 @@ Tested: MongoDB stopped during collection.
 On startup, the producer and consumer wait for Kafka to pass its healthcheck.
 `depends_on` alone is not enough: it waits for the container to start, not
 for the broker to accept connections.
+
+The dashboard shows an explicit message when MongoDB is unreachable, instead
+of surfacing a Python traceback.
 
 ## Validation
 
@@ -150,10 +175,14 @@ followed by a Docker Desktop restart.
 `ENV PYTHONUNBUFFERED=1` in the image, `docker compose logs` stays empty even
 when the pipeline is working.
 
+**Automatic map framing follows the data.** With `st.map`, the view drifted
+onto Spain whenever traffic clustered in the north of the bounding box. The
+dashboard therefore pins the centre and zoom explicitly through `pydeck`.
+
 ## Tech stack
 
 Python, Apache Kafka, Apache Spark (Structured Streaming), MongoDB,
-Docker Compose, pytest
+Streamlit, Docker Compose, pytest
 
 ## Tests
 
@@ -171,12 +200,15 @@ src/
 │   └── consumer.py        reading Kafka and writing to MongoDB
 ├── streaming/
 │   └── spark_job.py       real-time detections
+├── dashboard/
+│   └── app.py             Streamlit interface
 └── storage/
     └── mongo.py           database access
 
 docker/
 ├── collector.Dockerfile   shared producer/consumer image
 ├── spark.Dockerfile       Spark image with Kafka connectors
+├── dashboard.Dockerfile   Streamlit image
 └── download_jars.sh       connector download at build time
 
 scripts/
@@ -196,8 +228,10 @@ The producer polls every 60 s, capping each aircraft at 10 positions per
 10-minute window. A higher frequency would sharpen detection but consume more
 API credits (400 per day anonymously, 4000 with an account).
 
+The dashboard reads MongoDB on each manual refresh, with no automatic update.
+
 ## Next steps
 
-- Visualization dashboard: live map and alerts
 - Airflow orchestration and daily Parquet archiving
 - Star-schema data warehouse for historical analysis
+- Spark alerts surfaced in the dashboard
