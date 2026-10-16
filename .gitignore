@@ -3,3 +3,8 @@
 .env
 data/raw/
 __pycache__/
+
+logs/
+data/parquet/
+
+.vscode/

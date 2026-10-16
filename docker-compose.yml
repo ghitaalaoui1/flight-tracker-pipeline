@@ -84,6 +84,48 @@ services:
       - mongo
     environment:
       MONGO_URI: mongodb://mongo:27017
+  postgres:
+    image: postgres:16
+    container_name: flight-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      retries: 5
+
+  airflow:
+    image: apache/airflow:2.10.3-python3.12
+    container_name: flight-airflow
+    hostname: airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+      AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "300"
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
+      MONGO_URI: mongodb://mongo:27017
+      _PIP_ADDITIONAL_REQUIREMENTS: pymongo pandas pyarrow
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./data/parquet:/opt/airflow/data/parquet
+      - ./logs:/opt/airflow/logs
+    command: >
+      bash -c "airflow db migrate && (airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true) && airflow standalone"
 
 volumes:
   mongo_data:
+  pg_data:

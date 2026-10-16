@@ -6,7 +6,8 @@ Pipeline de donnees en temps reel sur le trafic aerien au-dessus du Maroc.
 
 Les positions des avions sont collectees depuis l'API OpenSky Network,
 publiees dans Kafka, stockees dans MongoDB, analysees en continu par
-Spark Structured Streaming, et visualisees dans un tableau de bord Streamlit.
+Spark Structured Streaming, visualisees dans un tableau de bord Streamlit,
+et archivees chaque nuit en Parquet par un DAG Airflow.
 
 ![Tableau de bord](docs/images/airtrafic.png)
 
@@ -14,8 +15,10 @@ Spark Structured Streaming, et visualisees dans un tableau de bord Streamlit.
 
 ```
                                     ┌──> Consumer ──> MongoDB ──> Dashboard
-OpenSky API ──> Producer ──> Kafka ─┤
-                                    └──> Spark Streaming ──> Alertes
+OpenSky API ──> Producer ──> Kafka ─┤                    │
+                                    └──> Spark Streaming │──> Alertes
+                                                         │
+                                         Airflow (2h00) ─┴──> Parquet
 ```
 
 | Composant | Role |
@@ -24,11 +27,17 @@ OpenSky API ──> Producer ──> Kafka ─┤
 | Kafka | File de messages qui decouple la collecte des traitements |
 | Consumer | Lit le topic et ecrit dans MongoDB |
 | Spark Streaming | Analyse le meme flux en parallele et detecte urgences, approches et circuits d'attente |
-| MongoDB | Stockage operationnel des positions |
+| MongoDB | Stockage operationnel des positions (couche chaude) |
 | Dashboard | Interface Streamlit : carte temps reel, indicateurs, vols en approche |
+| Airflow | Orchestre l'archivage quotidien en Parquet et la purge de MongoDB |
+| PostgreSQL | Base interne d'Airflow (metadonnees, historique des executions) |
 
 Le decouplage par Kafka permet d'ajouter un consommateur sans jamais
 modifier le producteur.
+
+Le projet combine les deux regimes de traitement : du **streaming** pour
+detecter et afficher en direct, du **batch** pour archiver, agreger et
+nettoyer a heure fixe.
 
 ## Lancer le projet
 
@@ -40,7 +49,12 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Le tableau de bord est ensuite accessible sur http://localhost:8501
+Interfaces disponibles une fois la pile demarree :
+
+| Service | Adresse | Identifiants |
+|---|---|---|
+| Tableau de bord | `http://localhost:8501` | aucun |
+| Airflow | `http://localhost:8080` | `admin` / `admin` |
 
 Suivre l'activite :
 
@@ -56,7 +70,7 @@ Arreter :
 docker compose down
 ```
 
-Les donnees sont conservees dans le volume `mongo_data`.
+Les donnees sont conservees dans les volumes `mongo_data` et `pg_data`.
 
 ## Acceder aux donnees
 
@@ -68,6 +82,20 @@ mongodb://localhost:27018
 ```
 
 Base `flights`, collection `positions`.
+
+Les archives Parquet sont ecrites dans `data/parquet/`, un fichier par jour :
+`positions_AAAA-MM-JJ.parquet`.
+
+## Cycle de vie de la donnee
+
+| Donnee | Emplacement | Usage |
+|---|---|---|
+| 3 derniers jours | MongoDB | Dashboard, alertes, requetes en direct |
+| Historique complet | Fichiers Parquet | Analyses sur plusieurs semaines |
+
+La separation entre couche chaude et couche froide evite de laisser grossir
+indefiniment la base operationnelle, tout en conservant l'historique dans un
+format colonne compact.
 
 ## Tableau de bord
 
@@ -98,6 +126,48 @@ streamlit run src/dashboard/app.py
 La detection de circuit d'attente utilise des fenetres glissantes de 10 min
 (pas de 5 min) avec un watermark de 2 min.
 
+## Orchestration
+
+![Airflow](docs/images/airflow.png)
+
+Le DAG `daily_archive` s'execute chaque nuit a 2h00 :
+
+```
+extract ──┬──> compute_stats
+          │
+          └──> write_parquet ──> cleanup
+```
+
+| Tache | Role |
+|---|---|
+| `extract` | Lit dans MongoDB les positions de la journee ecoulee |
+| `write_parquet` | Ecrit ces positions dans `data/parquet/positions_<date>.parquet` |
+| `compute_stats` | Calcule avions distincts, pays, altitude moyenne, top 5 des pays |
+| `cleanup` | Supprime de MongoDB les positions de plus de 3 jours |
+
+**L'ordre des taches est une decision de conception, pas une commodite.**
+`cleanup` prend en entree le chemin produit par `write_parquet`, ce qui cree
+une dependance explicite : Airflow ne purge jamais avant que l'archivage ait
+reussi. Si l'archivage echoue, la purge ne se lance pas ; si le lot est vide,
+elle s'annule d'elle-meme. Le raisonnement est le meme que pour les offsets
+Kafka : entre deux ordres possibles, on retient celui dont l'echec est
+reparable. Perdre de la place sur le disque se rattrape, perdre des donnees
+non.
+
+Chaque tache est configuree avec `retries: 2` et un delai de 5 minutes.
+
+Execution du 16/10/2026 sur la journee du 15/10 :
+
+| Tache | Resultat |
+|---|---|
+| `extract` | 5313 positions extraites |
+| `write_parquet` | 5313 lignes ecrites dans `positions_2026-10-15.parquet` |
+| `compute_stats` | altitude moyenne 10 657 m |
+| `cleanup` | 873 documents supprimes |
+
+L'egalite entre positions extraites et lignes ecrites est la verification qui
+compte : aucune ligne perdue entre MongoDB et le fichier Parquet.
+
 ## Qualite des donnees
 
 - Validation a l'entree : les positions sans latitude ou longitude sont rejetees
@@ -107,6 +177,8 @@ La detection de circuit d'attente utilise des fenetres glissantes de 10 min
 - Semantique at-least-once : les offsets Kafka sont valides apres ecriture en
   base et non avant, donc aucun message ne peut etre marque comme traite sans
   avoir ete enregistre. Les doublons eventuels sont absorbes par l'index unique.
+- Archivage avant purge : aucune donnee n'est supprimee de MongoDB sans avoir
+  ete ecrite en Parquet au prealable
 - Tests unitaires sur la transformation des donnees brutes
 
 ## Resilience
@@ -125,7 +197,8 @@ Test realise : MongoDB arrete pendant la collecte.
 
 Au demarrage, le producer et le consumer attendent que Kafka passe son
 healthcheck. `depends_on` seul ne suffit pas : il attend que le conteneur
-demarre, pas que le broker accepte les connexions.
+demarre, pas que le broker accepte les connexions. Airflow attend de la meme
+facon que PostgreSQL passe le sien.
 
 Le dashboard affiche un message explicite si MongoDB est injoignable, au lieu
 de remonter une trace Python.
@@ -183,10 +256,16 @@ vue se recentrait sur l'Espagne des que le trafic se concentrait au nord de
 la zone. Le dashboard fixe donc explicitement le centre et le zoom via
 `pydeck`.
 
+**Les logs d'anciennes tentatives Airflow peuvent etre perdus.** L'interface
+les sert depuis le worker qui a execute la tache ; si ce conteneur a ete
+recree, elle affiche une erreur `HTTPConnectionPool` a la place. Seule la
+derniere tentative est consultable. En cas de doute, lire les fichiers
+directement dans `/opt/airflow/logs`.
+
 ## Technologies
 
 Python, Apache Kafka, Apache Spark (Structured Streaming), MongoDB,
-Streamlit, Docker Compose, pytest
+Apache Airflow, PostgreSQL, Parquet, Streamlit, Docker Compose, pytest
 
 ## Tests
 
@@ -209,6 +288,9 @@ src/
 └── storage/
     └── mongo.py           acces a la base
 
+dags/
+└── daily_archive.py       DAG Airflow : archivage et purge
+
 docker/
 ├── collector.Dockerfile   image commune producer/consumer
 ├── spark.Dockerfile       image Spark avec connecteurs Kafka
@@ -220,6 +302,8 @@ scripts/
 
 tests/
 └── test_parsing.py
+
+data/parquet/              archives quotidiennes (ignore par Git)
 ```
 
 ## Limites connues
@@ -236,8 +320,12 @@ anonyme, 4000 avec un compte).
 Le dashboard lit MongoDB a chaque rafraichissement manuel, sans mise a jour
 automatique.
 
+Airflow tourne en `LocalExecutor` avec des identifiants par defaut, adaptes a
+un usage local uniquement. Un deploiement reel demanderait une gestion des
+secrets et un executeur distribue.
+
 ## Etapes suivantes
 
-- Orchestration Airflow et archivage quotidien en Parquet
 - Mini entrepot de donnees en schema en etoile pour l'analyse historique
 - Affichage des alertes Spark dans le dashboard
+- Authentification OAuth2 OpenSky pour passer de 400 a 4000 credits par jour
